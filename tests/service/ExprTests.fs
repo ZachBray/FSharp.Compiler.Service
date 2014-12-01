@@ -5,7 +5,7 @@
 #load "FsUnit.fs"
 #load "Common.fs"
 #else
-module FSharp.Compiler.Service.Tests.ExpeTests
+module FSharp.Compiler.Service.Tests.ExprTests
 #endif
 
 
@@ -752,3 +752,223 @@ let ``Test Declarations selfhost FSharp.Core`` () =
 
 #endif
 
+module ProjectObjectExprs =
+    
+    let fileName = Path.ChangeExtension(Path.GetTempFileName(), ".fs")
+
+    let getResultExpr script =
+        File.WriteAllText(fileName, script)
+
+        let projectOptions = 
+            checker.GetProjectOptionsFromScript(fileName, script)
+            |> Async.RunSynchronously
+
+        let results = 
+            checker.ParseAndCheckProject projectOptions
+            |> Async.RunSynchronously
+
+        match results.AssemblyContents.ImplementationFiles.[0].Declarations.[0] with
+        | FSharpImplementationFileDeclaration.Entity(_, contents) -> 
+            contents |> List.pick (function
+                | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mv, [], y) ->
+                    if mv.LogicalName = "result" then Some y
+                    else None
+                | _ -> None)
+        | _ -> failwith "expected a module"
+
+
+// Note: In the following tests `overrides` `CurriedParameterGroups` contains a parameter for `this`
+//       whereas `OverriddenMember`'s `CurriedParameterGroups` does not.
+
+let toStringRepresentation (overrides : FSharpObjectExprOverride list) =
+    let typeToString (t : FSharpType) =
+        if t.IsGenericParameter then "'" + t.GenericParameter.Name
+        else t.TypeDefinition.DisplayName
+    overrides |> List.map (fun o ->
+        let entity = o.OverriddenMember.Value.EnclosingEntity.DisplayName
+        let memberName = o.OverriddenMember.Value.DisplayName
+        let returnType = typeToString o.OverriddenMember.Value.ReturnParameter.Type
+        let args =
+            o.OverriddenMember.Value.CurriedParameterGroups |> Seq.collect (fun ps ->
+                ps |> Seq.map (fun p -> typeToString p.Type)
+            ) |> String.concat " * "
+        sprintf "%s.%s : %s -> %s" entity memberName args returnType
+    )
+
+[<Test>]
+let ``Type-checking obj exprs should identify overridden members when there are overloads``() =
+    let expr = ProjectObjectExprs.getResultExpr """
+[<AbstractClass>]
+type Level0() =
+    abstract Member0 : float -> string
+    abstract Member0 : int -> string
+
+let result =
+    { new Level0() with
+        member __.Member0(x : int) = ""
+        member __.Member0(x : float) = ""
+    }
+"""
+    match expr with
+    | BasicPatterns.ObjectExpr(_, _, overrides, _) ->
+        overrides
+        |> toStringRepresentation
+        |> shouldEqual [
+            "Level0.Member0 : int -> string"
+            "Level0.Member0 : float -> string"
+        ]
+    | _ -> Assert.Fail("Expected an ObjectExpr")
+
+[<Test>]
+let ``Type-checking obj exprs should identify overridden members when there are overloads and multiple levels of inheritance``() =
+    let expr = ProjectObjectExprs.getResultExpr """
+[<AbstractClass>]
+type Level0() =
+    abstract Member0 : float -> string
+
+[<AbstractClass>]
+type Level1() =
+    inherit Level0()
+    abstract Member0 : int -> string
+
+let result =
+    { new Level1() with
+        member __.Member0(x : int) = ""
+        member __.Member0(x : float) = ""
+    }
+"""
+    match expr with
+    | BasicPatterns.ObjectExpr(_, _, overrides, _) ->
+        overrides
+        |> toStringRepresentation
+        |> shouldEqual [
+            "Level1.Member0 : int -> string"
+            "Level0.Member0 : float -> string"
+        ]
+    | _ -> Assert.Fail("Expected an ObjectExpr")
+
+[<Test>]
+let ``Type-checking obj exprs should identify overridden members when there are overloads and a generic base type``() =
+    let expr = ProjectObjectExprs.getResultExpr """
+[<AbstractClass>]
+type Level0<'T0>() =
+    abstract Member0 : 'T0 -> string
+    abstract Member0 : int -> 'T0
+
+let result =
+    { new Level0<float>() with
+        member __.Member0 (_ : int) = 42.0
+        member __.Member0 (_ : float) = ""
+    }
+"""
+    match expr with
+    | BasicPatterns.ObjectExpr(_, _, overrides, _) ->
+        overrides
+        |> toStringRepresentation
+        |> shouldEqual [
+            "Level0.Member0 : int -> 'T0"
+            "Level0.Member0 : 'T0 -> string"
+        ]
+    | _ -> Assert.Fail("Expected an ObjectExpr")
+
+[<Test>]
+let ``Type-checking obj exprs should identify overridden members when there are overloads and a generic base type and the object expression is generic itself``() =
+    let expr = ProjectObjectExprs.getResultExpr """
+[<AbstractClass>]
+type Level0<'T0>() =
+    abstract Member0 : 'T0 -> string
+    abstract Member0 : int -> 'T0
+
+let result<'T1> =
+    { new Level0<'T1>() with
+        member __.Member0 (x : int) = Unchecked.defaultof<'T1>
+        member __.Member0 (_ : 'T1) = ""
+    }
+"""
+    match expr with
+    | BasicPatterns.ObjectExpr(_, _, overrides, _) ->
+        overrides
+        |> toStringRepresentation
+        |> shouldEqual [
+            "Level0.Member0 : int -> 'T0"
+            "Level0.Member0 : 'T0 -> string"
+        ]
+    | _ -> Assert.Fail("Expected an ObjectExpr")
+
+[<Test>]
+let ``Type-checking obj exprs should identify overridden members when there are overloads with generic method type parameters``() =
+    let expr = ProjectObjectExprs.getResultExpr """
+[<AbstractClass>]
+type Level0() =
+    abstract Member0 : 'T0 -> string
+    abstract Member0 : 'T1 * 'T2 -> 'T3
+    abstract Member0 : int -> string
+
+let result =
+    { new Level0() with
+        member __.Member0<'T4, 'T5, 'T6>(x : 'T4, y : 'T5) = Unchecked.defaultof<'T6>
+        member __.Member0(x : int) = ""
+        member __.Member0<'T3>(x : 'T3) = ""
+    }
+"""
+    match expr with
+    | BasicPatterns.ObjectExpr(_, _, overrides, _) ->
+        overrides
+        |> toStringRepresentation
+        |> shouldEqual [
+            "Level0.Member0 : 'T1 * 'T2 -> 'T3"
+            "Level0.Member0 : int -> string"
+            "Level0.Member0 : 'T0 -> string"
+        ]
+    | _ -> Assert.Fail("Expected an ObjectExpr")
+
+[<Test>]
+let ``Type-checking obj exprs should identify overridden members when there are overloads with generic method type parameters and the base type is generic``() =
+    let expr = ProjectObjectExprs.getResultExpr """
+[<AbstractClass>]
+type Level0<'T>() =
+    abstract Member0 : 'T0 -> 'T
+    abstract Member0 : 'T1 * 'T2 -> 'T3
+    abstract Member0 : int -> string
+
+let result =
+    { new Level0<float>() with
+        member __.Member0<'T4, 'T5, 'T6>(x : 'T4, y : 'T5) = Unchecked.defaultof<'T6>
+        member __.Member0(x : int) = ""
+        member __.Member0<'T3>(x : 'T3) = 42.0
+    }
+"""
+    match expr with
+    | BasicPatterns.ObjectExpr(_, _, overrides, _) ->
+        overrides
+        |> toStringRepresentation
+        |> shouldEqual [
+            "Level0.Member0 : 'T1 * 'T2 -> 'T3"
+            "Level0.Member0 : int -> string"
+            "Level0.Member0 : 'T0 -> 'T"
+        ]
+    | _ -> Assert.Fail("Expected an ObjectExpr")
+
+[<Test>]
+let ``Type-checking obj exprs should identify implemented members``() =
+    let expr = ProjectObjectExprs.getResultExpr """
+[<AbstractClass>]
+type Level0() =
+    abstract Dispose : unit -> unit
+
+let result =
+    { new Level0() with
+        member __.Dispose() = ()
+      interface System.IDisposable with
+        member __.Dispose() = ()
+    }
+"""
+    match expr with
+    | BasicPatterns.ObjectExpr(_, _, overrides, [_,implementations]) ->
+        overrides @ implementations
+        |> toStringRepresentation
+        |> shouldEqual [
+            "Level0.Dispose :  -> unit" // Note: unit parameter seems to be optimised away here
+            "IDisposable.Dispose :  -> unit"
+        ]
+    | _ -> Assert.Fail("Expected an ObjectExpr")

@@ -422,7 +422,7 @@ module FSharpExprConvert =
                         // Note, we re skipping the comparison of return types, it is not needed since overloading by return
                         // type is not permitted.
                         //returnTypesAEquiv cenv.g aenv mv.ReturnParameter.Type.Typ slotsig.FormalReturnType &&
-                        ((params1,slotsig.FormalParams) ||> List.lengthsEqAndForall2 (List.lengthsEqAndForall2 (fun p1 p2 -> typeAEquiv cenv.g aenv p1.Type.Typ p2.Type))))
+                        ((params1,slotsig.FormalParams) ||> List.lengthsEqAndForall2 (List.lengthsEqAndForall2 (fun p1 p2 -> typeAEquiv cenv.g aenv p1.Type.V p2.Type))))
 
                 match candidateMembers with
                 | res :: _ -> Some res
